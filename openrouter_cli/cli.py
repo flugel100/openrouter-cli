@@ -19,6 +19,8 @@ import sys
 from typing import Any, Optional
 
 from . import __version__
+from . import ui
+from .agents import UltracodeAgent, AgentReport
 from .backends import Backend, LlmRouterBackend, OpenRouterBackend
 from .client import (
     OpenRouterClient,
@@ -37,7 +39,7 @@ from .sessions import (
     save_session,
     save_imported_session,
 )
-from . import ui
+from .tools import ToolRegistry, build_default_registry
 
 DEFAULT_MODEL = "openai/gpt-4o-mini"
 
@@ -405,6 +407,19 @@ def _handle_repl_command(
         new_val = sub in {"on", "1", "true", "aktif"}
         return {"use_stream": new_val, "update": f"Mode {'streaming' if new_val else 'blok'} diaktifkan."}
 
+    if name == "/agent":
+        ui.show_info("Menjalankan agent ultracode...")
+        task = " ".join(parts[1:]) if len(parts) > 1 else "audit kode di direktori ini"
+        registry = build_default_registry(approval="auto")
+        # Gunakan backend pertama yang tersedia
+        if isinstance(backend, OpenRouterBackend):
+            agent = UltracodeAgent(backend, registry, tier="lite", verbose=True)
+            report = agent.run(task, scope=".")
+            print(report.summary())
+        else:
+            ui.show_error("Agent hanya untuk backend OpenRouter.")
+        return ""
+
     if name in {"/quit", "/exit"}:
         return "exit"
 
@@ -459,6 +474,33 @@ def _tools_loop(
         messages.append(final)
         return final
     return message
+
+
+# ---------------------------------------------------------------------- #
+# Agent commands
+# ---------------------------------------------------------------------- #
+def cmd_agent(args: argparse.Namespace) -> int:
+    """Jalankan agent audit (ultracode) pada scope direktori/task."""
+    backend = _build_backend(args)
+    if not isinstance(backend, OpenRouterBackend):
+        ui.show_error("Agent hanya didukung pada backend OpenRouter (tanpa --router).")
+        return 1
+
+    tools = build_default_registry(approval=args.approval or "auto")
+    agent = UltracodeAgent(backend, tools, tier=args.tier or "medium", verbose=not args.quiet)
+    ui.show_info(f"Agent ultracode (tier={agent.tier}, scope={args.scope})")
+    ui.show_info(f"Tugas: {args.task}\n")
+
+    report = agent.run(args.task, scope=args.scope)
+    print(report.summary())
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as fh:
+            fh.write(report.summary() + "\n\n")
+            for f in report.findings:
+                fh.write(f"- [{f.severity}] {f.id}: {f.claim} ({f.location})\n")
+        ui.show_info(f"Laporan tersimpan ke {args.output}")
+    return 0
 
 
 def _blocks_to_text(content: Any) -> str:
@@ -556,6 +598,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_sessions.add_argument("--format", choices=["auto", "md", "json"], default="auto", help="Export format");
     p_sessions.add_argument("--import", dest="import_file", metavar="FILE", help="Import a session JSON file");
     p_sessions.set_defaults(func=cmd_sessions)
+
+    p_agent = sub.add_parser("agent", help="Jalankan agent audit kode (ultracode)")
+    p_agent.add_argument("task", help="Deskripsi tugas audit")
+    p_agent.add_argument("--scope", default=".", help="Direktori/file target (default: .)")
+    p_agent.add_argument("--tier", choices=["lite", "medium", "deep"], default="medium", help="Kedalaman audit")
+    p_agent.add_argument("--approval", choices=["auto", "ask", "deny"], default="auto", help="Persetujuan tool")
+    p_agent.add_argument("--output", "-o", help="Simpan laporan ke file")
+    p_agent.add_argument("--quiet", "-q", action="store_true", help="Sembunyikan log agent")
+    p_agent.set_defaults(func=cmd_agent)
 
     return parser
 

@@ -107,6 +107,7 @@ def show_help() -> None:
         "/clear           hapus riwayat percakapan sesi ini",
         "/status          tampilkan model & sesi aktif",
         "/stream on|off   nyalakan/matikan streaming token",
+        "/agent [tugas]   jalankan agent audit kode",
         "/quit, exit      keluar (sesi otomatis tersimpan)",
     ]
     if HAS_RICH:
