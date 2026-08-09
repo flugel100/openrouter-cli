@@ -15,7 +15,7 @@ import argparse
 import datetime
 import json
 import sys
-from typing import Any
+from typing import Any, Optional
 
 from . import __version__
 from .client import (
@@ -23,6 +23,13 @@ from .client import (
     OpenRouterError,
     build_default_tools,
     resolve_api_key,
+)
+from .sessions import (
+    delete_session,
+    list_sessions,
+    load_session,
+    pick_session_interactive,
+    save_session,
 )
 
 DEFAULT_MODEL = "openai/gpt-4o-mini"
@@ -206,6 +213,29 @@ def cmd_models(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sessions(args: argparse.Namespace) -> int:
+    """List/delete saved sessions."""
+    if args.delete:
+        removed = delete_session(args.delete)
+        if removed:
+            print(f"Deleted session '{args.delete}'.")
+        else:
+            print(f"No session named '{args.delete}'.")
+            return 1
+        return 0
+
+    sessions = list_sessions()
+    if not sessions:
+        print("No saved sessions.")
+        return 0
+    print(f"{'NAME':<20} {'MODEL':<30} {'MSGS':<5} UPDATED")
+    for s in sessions:
+        print(
+            f"{s['name']:<20} {(s['model'] or '-')[:29]:<30} {s['messages']:<5} {s.get('updated','')}"
+        )
+    return 0
+
+
 def cmd_repl(args: argparse.Namespace) -> int:
     client = _build_client(args)
     model = args.model or DEFAULT_MODEL
@@ -213,8 +243,30 @@ def cmd_repl(args: argparse.Namespace) -> int:
         model = pick_model(client)
 
     tools = build_default_tools() if args.tools else None
-    messages: list[dict[str, Any]] = []
+
+    # --- session handling ------------------------------------------------ #
+    session = None
+    session_name: Optional[str] = None
+    if args.session:
+        session_name = args.session
+    elif args.continue_session:
+        session_name = pick_session_interactive()
+        if session_name is None:
+            print("Starting a fresh session.")
+    if session_name:
+        session = load_session(session_name)
+        num_turns = len(session["messages"])
+        if num_turns:
+            print(f"Resuming session '{session_name}' with {num_turns} messages.")
+            model = session.get("model") or model
+        else:
+            print(f"Starting new session '{session_name}'.")
+        session["model"] = model
+
+    messages: list[dict[str, Any]] = session["messages"] if session else []
     print(f"OpenRouter REPL — model: {model}  (Ctrl+D/Ctrl+C to quit)")
+    if session_name:
+        print(f"Session: {session_name}")
     if tools:
         print("Tools enabled: " + ", ".join(sorted(TOOL_FUNCS)))
     print("-" * 50)
@@ -224,8 +276,22 @@ def cmd_repl(args: argparse.Namespace) -> int:
             user = input("You > ")
         except (EOFError, KeyboardInterrupt):
             print()
+            if session_name is not None:
+                try:
+                    save_session(session)
+                except OSError as exc:
+                    print(f"Could not save session: {exc}", file=sys.stderr)
+                else:
+                    print(f"Session saved to '{session_name}'.")
             return 0
         if user.strip().lower() in {"exit", "quit"}:
+            if session_name is not None:
+                try:
+                    save_session(session)
+                except OSError as exc:
+                    print(f"Could not save session: {exc}", file=sys.stderr)
+                else:
+                    print(f"Session saved to '{session_name}'.")
             return 0
         if not user.strip():
             continue
@@ -306,7 +372,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_repl = sub.add_parser("repl", help="Interactive chat loop")
     p_repl.add_argument("--tools", action="store_true", help="Enable tool calling");
+    p_repl.add_argument("--session", help="Resume/create a named session");
+    p_repl.add_argument(
+        "--continue", dest="continue_session", action="store_true",
+        help="Pick a saved session to resume interactively",
+    );
     p_repl.set_defaults(func=cmd_repl)
+
+    p_sessions = sub.add_parser("sessions", help="List saved chat sessions")
+    p_sessions.add_argument("--delete", metavar="NAME", help="Delete a session by name");
+    p_sessions.set_defaults(func=cmd_sessions)
 
     return parser
 

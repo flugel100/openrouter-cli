@@ -9,6 +9,7 @@ interactive CLI, written in Python.
 - Tool / function calling with local execution
 - Interactive REPL
 - Interactive model picker / catalogue listing
+- Persistent multi-turn chat sessions
 
 ## Installation
 
@@ -45,6 +46,12 @@ openrouter chat --pick "hello"
 # interactive chat
 openrouter repl
 openrouter repl --tools
+
+# persistent sessions (stored as JSON under ~/.local/share/openrouter-cli/sessions)
+openrouter repl --session research       # save/resume a named session
+openrouter repl --continue               # pick a saved session interactively
+openrouter sessions                      # list saved sessions
+openrouter sessions --delete research    # delete a session
 
 # pick a model at the start of the REPL
 openrouter repl --pick
