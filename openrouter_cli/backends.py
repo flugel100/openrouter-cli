@@ -19,6 +19,8 @@ from typing import Any, Iterator, Optional, Protocol
 
 from .client import OpenRouterClient, OpenRouterError, extract_text
 
+__all__ = ["Backend", "OpenRouterBackend", "LlmRouterBackend"]
+
 
 class Backend(Protocol):
     """The minimal interface both backends implement."""

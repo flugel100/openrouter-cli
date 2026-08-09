@@ -226,8 +226,8 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     return 0
 
 
-def _save_session_quiet(session) -> bool:
-    """Persist a session dict, returning True on success. Corrupt-safe."""
+def _save_session_quiet(session: dict[str, Any]) -> bool:
+    """Simpan sesi tanpa error. Kembalikan True kalau berhasil."""
     try:
         save_session(session)
     except (OSError, TypeError, ValueError):
@@ -396,12 +396,16 @@ def _step_with_backend_tools(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Run one exchange executing tool calls via the OpenRouter backend."""
-    # Reuse the existing tool-loop helper by constructing a client-like wrapper.
+    """Jalankan satu exchange tool-calls, mutasi messages, kembalikan message terakhir."""
     return _tools_loop(backend, messages, tools)
 
 
-def _tools_loop(backend, messages, tools) -> dict[str, Any]:
+def _tools_loop(
+    backend: OpenRouterBackend,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Jalankan satu putaran chat + tool-calls lewat OpenRouter backend."""
     message = backend.complete(messages, tools=tools)
     messages.append(message)
 

@@ -13,6 +13,19 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+__all__ = [
+    "export_markdown",
+    "export_json",
+    "export_session",
+    "import_session",
+    "save_imported_session",
+    "load_session",
+    "save_session",
+    "list_sessions",
+    "delete_session",
+    "pick_session_interactive",
+]
+
 
 def sessions_dir() -> str:
     """Return the directory where session files are stored, creating it."""
