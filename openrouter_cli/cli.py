@@ -37,6 +37,7 @@ from .sessions import (
     save_session,
     save_imported_session,
 )
+from . import ui
 
 DEFAULT_MODEL = "openai/gpt-4o-mini"
 
@@ -236,6 +237,7 @@ def _save_session_quiet(session: dict[str, Any]) -> bool:
 
 
 def cmd_repl(args: argparse.Namespace) -> int:
+    ui.setup_history()
     backend = _build_backend(args)
     model = args.model or DEFAULT_MODEL
     backend.set_model(model)
@@ -253,42 +255,31 @@ def cmd_repl(args: argparse.Namespace) -> int:
     elif args.continue_session:
         session_name = pick_session_interactive()
         if session_name is None:
-            print("Memulai sesi baru.")
+            ui.show_info("Memulai sesi baru.")
     if session_name:
         session = load_session(session_name)
         num_turns = len(session["messages"])
         if num_turns:
-            print(f"Melanjutkan sesi '{session_name}' ({num_turns} pesan).")
+            ui.show_info(f"Melanjutkan sesi '{session_name}' ({num_turns} pesan).")
             if session.get("model"):
                 model = session["model"]
                 backend.set_model(model)
         else:
-            print(f"Memulai sesi baru '{session_name}'.")
+            ui.show_info(f"Memulai sesi baru '{session_name}'.")
         session["model"] = model
 
     messages: list[dict[str, Any]] = session["messages"] if session else []
-    print(f"OpenRouter REPL — model: {backend.model}  (Ctrl+D/Ctrl+C untuk keluar)")
-    if session_name:
-        print(f"Sesi: {session_name}")
-    if tools:
-        print("Tools aktif: " + ", ".join(sorted(TOOL_FUNCS)))
-    print("Ketik /help untuk bantuan.")
-    print("-" * 50)
-
     use_stream = not getattr(args, "no_stream", False)
 
-    def show_banner() -> None:
-        mode = "streaming" if use_stream else "blok"
-        print(f"\n→ Model aktif: {backend.model} (backend: {backend.backend_name}, mode: {mode})")
-        if session_name:
-            print(f"→ Sesi: {session_name} ({len(messages)} pesan)")
-        print()
+    ui.show_welcome(backend.model, session_name, use_stream)
+    if tools:
+        ui.show_info("Tools aktif: " + ", ".join(sorted(TOOL_FUNCS)))
 
     while True:
         try:
-            user = input("You > ")
+            user = ui.user_prompt(session_name)
         except (EOFError, KeyboardInterrupt):
-            print("\nSampai jumpa!")
+            ui.show_info("Sampai jumpa!")
             if session_name is not None:
                 _save_session_quiet(session)
             return 0
@@ -300,19 +291,21 @@ def cmd_repl(args: argparse.Namespace) -> int:
         if low in {"exit", "quit"}:
             if session_name is not None:
                 ok = _save_session_quiet(session)
-                print("Sesi tersimpan." if ok else "Gagal menyimpan sesi.")
+                ui.show_info("Sesi tersimpan." if ok else "Gagal menyimpan sesi.")
             return 0
 
         # --- perintah slash ---
         if cmd.startswith("/"):
             handled = _handle_repl_command(
-                cmd, backend, messages, session, session_name, show_banner
+                cmd, backend, messages, session, session_name, use_stream
             )
+            if isinstance(handled, dict):
+                use_stream = handled.get("use_stream", use_stream)
+                update = handled.get("update")
+                if update:
+                    ui.show_info(update)
             if handled == "exit":
                 return 0
-            if handled.startswith("stream:"):
-                use_stream = handled == "stream:on"
-                print(f"→ Mode {'streaming' if use_stream else 'blok'} diaktifkan.")
             continue
 
         if not user.strip():
@@ -323,28 +316,28 @@ def cmd_repl(args: argparse.Namespace) -> int:
             if tools and isinstance(backend, OpenRouterBackend):
                 message = _step_with_backend_tools(backend, messages, tools)
                 content = message.get("content")
-                print(f"\n{backend.model} > {_blocks_to_text(content)}\n")
+                ui.print_response_block(backend.model, _blocks_to_text(content))
             elif isinstance(backend, OpenRouterBackend) and use_stream:
-                # Mode streaming — token muncul satu per satu
-                print(f"\n{backend.model} > ", end="", flush=True)
+                live = ui.print_response_stream_start(backend.model)
                 chunks: list[str] = []
+                cancelled = False
                 try:
                     for delta in backend.stream(messages):
-                        print(delta, end="", flush=True)
                         chunks.append(delta)
+                        ui.print_response_stream_update(live, "".join(chunks))
                 except KeyboardInterrupt:
-                    print(" [Dibatalkan]", end="", flush=True)
-                print("\n")
+                    cancelled = True
                 full = "".join(chunks)
+                ui.print_response_stream_end(live, full, cancelled)
                 if full:
                     messages.append({"role": "assistant", "content": full})
             else:
                 message = backend.complete(messages)
                 content = message["content"]
                 messages.append({"role": "assistant", "content": _blocks_to_text(content)})
-                print(f"\n{backend.model} > {_blocks_to_text(content)}\n")
+                ui.print_response_block(backend.model, _blocks_to_text(content))
         except OpenRouterError as exc:
-            print(f"\nGalat: {exc}", file=sys.stderr)
+            ui.show_error(str(exc))
 
 
 def _handle_repl_command(
@@ -353,68 +346,69 @@ def _handle_repl_command(
     messages: list[dict[str, Any]],
     session,
     session_name: Optional[str],
-    show_banner,
-) -> str:
-    """Handle a slash command in the REPL. Returns 'exit' to quit the loop."""
+    use_stream: bool,
+) -> str | dict[str, Any]:
+    """Tangani perintah slash di REPL.
+
+    Return ``"exit"`` untuk keluar, ``dict`` untuk pembaruan status
+    (mis. toggle streaming), atau ``str`` kosong.
+    """
     parts = cmd.split()
     name = parts[0].lower()
 
     if name == "/help":
-        print(
-            "\nPerintah:\n"
-            "  /model <id>      ganti model\n"
-            "  /models          daftar model (backend OpenRouter)\n"
-            "  /clear           hapus riwayat percakapan sesi ini\n"
-            "  /status          tampilkan model & sesi aktif\n"
-            "  /quit, exit      keluar (sesi otomatis tersimpan)\n"
-            "  /stream on|off   nyalakan/matikan streaming token\n"
-            "\nTips: token muncul satu per satu (live streaming).\n"
-            "      Pakai --no-stream atau /stream off buat mode blok.\n"
-        )
+        ui.show_help()
         return ""
 
     if name == "/model":
         if len(parts) < 2:
-            print(f"Model aktif: {backend.model}")
+            ui.show_info(f"Model aktif: {backend.model}")
             return ""
         backend.set_model(parts[1])
         if session is not None:
             session["model"] = parts[1]
-        print(f"→ Model diganti: {parts[1]}")
+        ui.show_info(f"Model diganti: {parts[1]}")
         return ""
 
     if name == "/models":
         if isinstance(backend, OpenRouterBackend):
             models = backend.available_models()
             if models:
-                print("Model tersedia:")
+                ui.show_info("Model tersedia:")
                 for m in models[:100]:
                     print(f"  {m}")
             else:
-                print("Tidak bisa ambil daftar model (jaringan/API).")
+                ui.show_info("Tidak bisa ambil daftar model (jaringan/API).")
         else:
-            print("Backend llm-router tidak menyediakan daftar model.")
+            ui.show_info("Backend llm-router tidak menyediakan daftar model.")
         return ""
 
     if name == "/clear":
         messages.clear()
         if session_msg := (session or {}).get("messages"):
             session_msg.clear()
-        print("Riwayat percakapan dihapus.")
+        ui.show_info("Riwayat percakapan dihapus.")
         return ""
 
     if name == "/status":
-        show_banner()
+        ui.show_status(
+            backend.model,
+            backend.backend_name,
+            use_stream,
+            session_name,
+            len(messages),
+        )
         return ""
 
     if name == "/stream":
         sub = parts[1].lower() if len(parts) > 1 else "on"
-        return f"stream:{'on' if sub in {'on','1','true','aktif'} else 'off'}"
+        new_val = sub in {"on", "1", "true", "aktif"}
+        return {"use_stream": new_val, "update": f"Mode {'streaming' if new_val else 'blok'} diaktifkan."}
 
     if name in {"/quit", "/exit"}:
         return "exit"
 
-    print(f"Perintah tidak dikenal: {name}. Ketik /help untuk bantuan.")
+    ui.show_info(f"Perintah tidak dikenal: {name}. Ketik /help untuk bantuan.")
     return ""
 
 

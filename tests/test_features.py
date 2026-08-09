@@ -205,15 +205,12 @@ class ReplCommandTestCase(unittest.TestCase):
         b.model = model
         return b
 
-    def _fn(self):
-        return lambda: None
-
     def test_model_command_sets_backend_and_session(self):
         messages = []
         session = {"model": None, "messages": []}
         b = self._backend_mock()
         ret = cli._handle_repl_command(
-            "/model openai/gpt-4o-mini", b, messages, session, "demo", self._fn()
+            "/model openai/gpt-4o-mini", b, messages, session, "demo", True
         )
         self.assertEqual(ret, "")
         b.set_model.assert_called_once_with("openai/gpt-4o-mini")
@@ -223,7 +220,7 @@ class ReplCommandTestCase(unittest.TestCase):
         messages = [{"role": "user", "content": "x"}]
         b = self._backend_mock()
         ret = cli._handle_repl_command(
-            "/clear", b, messages, {}, "demo", self._fn()
+            "/clear", b, messages, {}, "demo", True
         )
         self.assertEqual(ret, "")
         self.assertEqual(messages, [])
@@ -231,26 +228,28 @@ class ReplCommandTestCase(unittest.TestCase):
     def test_quit_command_returns_exit(self):
         b = self._backend_mock()
         ret = cli._handle_repl_command(
-            "/quit", b, [], {}, "demo", self._fn()
+            "/quit", b, [], {}, "demo", True
         )
         self.assertEqual(ret, "exit")
 
     def test_unknown_command_returns_empty(self):
         b = self._backend_mock()
-        with mock.patch.object(cli, "print"):
+        with mock.patch.object(cli.ui, "show_info"):  # suppress print
             ret = cli._handle_repl_command(
-                "/unknown", b, [], {}, "demo", self._fn()
+                "/unknown", b, [], {}, "demo", True
             )
         self.assertEqual(ret, "")
 
-    def test_stream_command_returns_on_off(self):
+    def test_stream_command_returns_dict(self):
         b = self._backend_mock()
-        ret = cli._handle_repl_command("/stream on", b, [], {}, "demo", self._fn())
-        self.assertEqual(ret, "stream:on")
-        ret = cli._handle_repl_command("/stream off", b, [], {}, "demo", self._fn())
-        self.assertEqual(ret, "stream:off")
-        ret = cli._handle_repl_command("/stream", b, [], {}, "demo", self._fn())
-        self.assertEqual(ret, "stream:on")
+        ret = cli._handle_repl_command("/stream on", b, [], {}, "demo", True)
+        self.assertIsInstance(ret, dict)
+        self.assertEqual(ret["use_stream"], True)
+        self.assertIn("update", ret)
+        ret = cli._handle_repl_command("/stream off", b, [], {}, "demo", True)
+        self.assertEqual(ret["use_stream"], False)
+        ret = cli._handle_repl_command("/stream", b, [], {}, "demo", True)
+        self.assertEqual(ret["use_stream"], True)
 
 
 class CmdSessionsExportTestCase(XDGIsolationMixin, unittest.TestCase):
