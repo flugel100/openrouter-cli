@@ -243,6 +243,15 @@ class ReplCommandTestCase(unittest.TestCase):
             )
         self.assertEqual(ret, "")
 
+    def test_stream_command_returns_on_off(self):
+        b = self._backend_mock()
+        ret = cli._handle_repl_command("/stream on", b, [], {}, "demo", self._fn())
+        self.assertEqual(ret, "stream:on")
+        ret = cli._handle_repl_command("/stream off", b, [], {}, "demo", self._fn())
+        self.assertEqual(ret, "stream:off")
+        ret = cli._handle_repl_command("/stream", b, [], {}, "demo", self._fn())
+        self.assertEqual(ret, "stream:on")
+
 
 class CmdSessionsExportTestCase(XDGIsolationMixin, unittest.TestCase):
     def test_cmd_sessions_exports_demo_session(self):

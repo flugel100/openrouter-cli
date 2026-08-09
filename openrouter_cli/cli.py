@@ -275,8 +275,11 @@ def cmd_repl(args: argparse.Namespace) -> int:
     print("Ketik /help untuk bantuan.")
     print("-" * 50)
 
+    use_stream = not getattr(args, "no_stream", False)
+
     def show_banner() -> None:
-        print(f"\n→ Model aktif: {backend.model} (backend: {backend.backend_name})")
+        mode = "streaming" if use_stream else "blok"
+        print(f"\n→ Model aktif: {backend.model} (backend: {backend.backend_name}, mode: {mode})")
         if session_name:
             print(f"→ Sesi: {session_name} ({len(messages)} pesan)")
         print()
@@ -307,6 +310,9 @@ def cmd_repl(args: argparse.Namespace) -> int:
             )
             if handled == "exit":
                 return 0
+            if handled.startswith("stream:"):
+                use_stream = handled == "stream:on"
+                print(f"→ Mode {'streaming' if use_stream else 'blok'} diaktifkan.")
             continue
 
         if not user.strip():
@@ -317,14 +323,28 @@ def cmd_repl(args: argparse.Namespace) -> int:
             if tools and isinstance(backend, OpenRouterBackend):
                 message = _step_with_backend_tools(backend, messages, tools)
                 content = message.get("content")
+                print(f"\n{backend.model} > {_blocks_to_text(content)}\n")
+            elif isinstance(backend, OpenRouterBackend) and use_stream:
+                # Mode streaming — token muncul satu per satu
+                print(f"\n{backend.model} > ", end="", flush=True)
+                chunks: list[str] = []
+                try:
+                    for delta in backend.stream(messages):
+                        print(delta, end="", flush=True)
+                        chunks.append(delta)
+                except KeyboardInterrupt:
+                    print(" [Dibatalkan]", end="", flush=True)
+                print("\n")
+                full = "".join(chunks)
+                if full:
+                    messages.append({"role": "assistant", "content": full})
             else:
                 message = backend.complete(messages)
                 content = message["content"]
                 messages.append({"role": "assistant", "content": _blocks_to_text(content)})
-
-            print(f"\n{backend.model} > {_blocks_to_text(content)}\n")
+                print(f"\n{backend.model} > {_blocks_to_text(content)}\n")
         except OpenRouterError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
+            print(f"\nGalat: {exc}", file=sys.stderr)
 
 
 def _handle_repl_command(
@@ -343,10 +363,13 @@ def _handle_repl_command(
         print(
             "\nPerintah:\n"
             "  /model <id>      ganti model\n"
-            "  /models          daftar model yang tersedia (backend OpenRouter)\n"
+            "  /models          daftar model (backend OpenRouter)\n"
             "  /clear           hapus riwayat percakapan sesi ini\n"
             "  /status          tampilkan model & sesi aktif\n"
             "  /quit, exit      keluar (sesi otomatis tersimpan)\n"
+            "  /stream on|off   nyalakan/matikan streaming token\n"
+            "\nTips: token muncul satu per satu (live streaming).\n"
+            "      Pakai --no-stream atau /stream off buat mode blok.\n"
         )
         return ""
 
@@ -383,6 +406,10 @@ def _handle_repl_command(
     if name == "/status":
         show_banner()
         return ""
+
+    if name == "/stream":
+        sub = parts[1].lower() if len(parts) > 1 else "on"
+        return f"stream:{'on' if sub in {'on','1','true','aktif'} else 'off'}"
 
     if name in {"/quit", "/exit"}:
         return "exit"
@@ -520,6 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_repl = sub.add_parser("repl", help="Interactive chat loop")
     p_repl.add_argument("--tools", action="store_true", help="Enable tool calling");
+    p_repl.add_argument("--no-stream", action="store_true", help="Matikan live streaming (mode blok)");
     p_repl.add_argument("--session", help="Resume/create a named session");
     p_repl.add_argument(
         "--continue", dest="continue_session", action="store_true",
