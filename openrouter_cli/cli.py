@@ -28,6 +28,7 @@ from .client import (
     build_default_tools,
     resolve_api_key,
 )
+from .server import run_server
 from .sessions import (
     _slug,
     delete_session,
@@ -503,6 +504,19 @@ def cmd_agent(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Mulai server HTTP OpenAI-compatible."""
+    backend = _build_backend(args)
+    model = args.model or DEFAULT_MODEL
+    backend.set_model(model)
+    try:
+        run_server(backend, host=args.host, port=args.port, model=model)
+    except OSError as exc:
+        ui.show_error(f"Gagal mulai server: {exc}")
+        return 1
+    return 0
+
+
 def _blocks_to_text(content: Any) -> str:
     """Convert OpenRouter's possible structured content into plain text."""
     if isinstance(content, str):
@@ -607,6 +621,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_agent.add_argument("--output", "-o", help="Simpan laporan ke file")
     p_agent.add_argument("--quiet", "-q", action="store_true", help="Sembunyikan log agent")
     p_agent.set_defaults(func=cmd_agent)
+
+    p_serve = sub.add_parser("serve", help="Mulai server HTTP OpenAI-compatible")
+    p_serve.add_argument("--host", default="127.0.0.1", help="Alamat bind (default: 127.0.0.1)")
+    p_serve.add_argument("--port", type=int, default=9876, help="Port (default: 9876)")
+    p_serve.set_defaults(func=cmd_serve)
 
     return parser
 
