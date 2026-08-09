@@ -141,3 +141,92 @@ def pick_session_interactive() -> Optional[str]:
     if 0 <= idx < len(sessions):
         return sessions[idx]["name"]
     return None
+
+
+# ---------------------------------------------------------------------- #
+# Export / import
+# ---------------------------------------------------------------------- #
+def message_to_text(message: dict[str, Any]) -> str:
+    """Render a single message's content (content may be str or block list)."""
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(str(block.get("text", "")))
+        return "\n".join(parts)
+    return str(content)
+
+
+def export_markdown(session: dict[str, Any]) -> str:
+    """Render a session to readable Markdown."""
+    name = session.get("name", "session")
+    model = session.get("model") or "unknown"
+    lines = [f"# Session: {name}", "", f"- **Model:** {model}", ""]
+    for msg in session.get("messages", []):
+        role = msg.get("role", "user")
+        label = {"user": "🧑 You", "assistant": "🤖 Assistant", "system": "⚙️ System"}.get(
+            role, role
+        )
+        # Tool messages show the tool name; tool_calls on assistant are noted.
+        tool_call_id = msg.get("tool_call_id")
+        if tool_call_id:
+            label += f" (tool `{tool_call_id}`)"
+        text = message_to_text(msg)
+        lines.append(f"### {label}\n")
+        lines.append(text)
+        lines.append("")
+        if msg.get("tool_calls"):
+            for call in msg["tool_calls"]:
+                fn = call.get("function", {})
+                lines.append(f"- ⚙️ tool_call: **{fn.get('name', '')}** args=`{fn.get('arguments')}`")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def export_json(session: dict[str, Any]) -> str:
+    """Render a session to pretty JSON."""
+    return json.dumps(session, ensure_ascii=False, indent=2, default=str) + "\n"
+
+
+def export_session(session: dict[str, Any], path: str, fmt: str = "auto") -> str:
+    """Write a session transcript to ``path``.
+
+    ``fmt`` is one of ``"md"``, ``"json"`` or ``"auto"`` (match on extension).
+    Returns the format actually written.
+    """
+    if fmt == "auto":
+        fmt = "json" if path.rstrip().lower().endswith(".json") else "md"
+    payload = export_json(session) if fmt == "json" else export_markdown(session)
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(payload)
+    return fmt
+
+
+def import_session(path: str) -> dict[str, Any]:
+    """Load a session from a JSON file (from ``export_session`` or ``load_session``).
+
+    Returns the session dict. Raises OpenRouterError if the file is not a
+    session file.
+    """
+    from .client import OpenRouterError
+
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
+        raise OpenRouterError(f"{path} is not a valid session JSON file.")
+    data.setdefault("name", os.path.splitext(os.path.basename(path))[0])
+    return data
+
+
+def save_imported_session(session: dict[str, Any]) -> str:
+    """Persist an imported session under the sessions dir, returning its name."""
+    name = session.get("name") or "imported"
+    sess = load_session(name)
+    sess["messages"] = session["messages"]
+    sess["model"] = session.get("model") or sess["model"]
+    save_session(sess)
+    return name

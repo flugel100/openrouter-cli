@@ -14,10 +14,12 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 import sys
 from typing import Any, Optional
 
 from . import __version__
+from .backends import Backend, LlmRouterBackend, OpenRouterBackend
 from .client import (
     OpenRouterClient,
     OpenRouterError,
@@ -25,11 +27,15 @@ from .client import (
     resolve_api_key,
 )
 from .sessions import (
+    _slug,
     delete_session,
+    export_session,
+    import_session,
     list_sessions,
     load_session,
     pick_session_interactive,
     save_session,
+    save_imported_session,
 )
 
 DEFAULT_MODEL = "openai/gpt-4o-mini"
@@ -106,79 +112,30 @@ def pick_model(client: OpenRouterClient) -> str:
 # ---------------------------------------------------------------------- #
 # Message handling with executable tools
 # ---------------------------------------------------------------------- #
-def step_with_tools(
-    client: OpenRouterClient,
-    model: str,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Run one exchange, executing any tool calls the model requests.
-
-    Mutates ``messages`` in place and returns the updated list.
-    """
-    response = client.chat(model, messages, tools=tools)
-    message = response["choices"][0]["message"]
-    messages.append(message)
-
-    if message.get("tool_calls"):
-        for call in message["tool_calls"]:
-            fn = call.get("function", {})
-            name = fn.get("name", "")
-            args_raw = fn.get("arguments") or "{}"
-            try:
-                args = json.loads(args_raw) if args_raw else {}
-            except json.JSONDecodeError:
-                args = {}
-            tool_result: dict[str, Any]
-            if name in TOOL_FUNCS:
-                try:
-                    value = TOOL_FUNCS[name](**args)
-                    tool_result = {"content": str(value)}
-                except Exception as exc:  # noqa: BLE001
-                    tool_result = {"content": f"Error: {exc}"}
-            else:
-                tool_result = {"content": f"Unknown tool: {name}"}
-
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.get("id", ""),
-                    "content": tool_result["content"],
-                }
-            )
-        # Ask the model to continue with the tool results.
-        final = client.chat(model, messages, tools=tools)
-        messages.append(final["choices"][0]["message"])
-    return messages
-
-
-def _print_text(text: str) -> None:
-    print(text)
-
-
 # ---------------------------------------------------------------------- #
 # Commands
 # ---------------------------------------------------------------------- #
 def cmd_chat(args: argparse.Namespace) -> int:
-    client = _build_client(args)
-    model = args.model
+    backend = _build_backend(args)
+    model = args.model or DEFAULT_MODEL
+    backend.set_model(model)
     if args.pick:
-        model = pick_model(client)
+        # Only OpenRouter backend has a model catalogue.
+        if isinstance(backend, OpenRouterBackend):
+            backend.set_model(pick_model(backend._client))
     messages = [{"role": "user", "content": args.prompt}]
     try:
         if args.tools:
+            if not isinstance(backend, OpenRouterBackend):
+                print("--tools hanya didukung untuk backend OpenRouter (tanpa --router).", file=sys.stderr)
+                return 1
             tools = build_default_tools()
-            step_with_tools(client, model, messages, tools)
-            # Print the final assistant text.
+            _step_with_backend_tools(backend, messages, tools)
             last = messages[-1]
-            content = last.get("content")
-            if isinstance(content, str):
-                print(content)
-            else:
-                print(_blocks_to_text(content))
+            print(_blocks_to_text(last.get("content")))
         else:
-            text = client.chat_content(model, messages)
-            print(text)
+            message = backend.complete(messages)
+            print(_blocks_to_text(message.get("content")))
     except OpenRouterError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -186,14 +143,20 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
 
 def cmd_stream(args: argparse.Namespace) -> int:
-    client = _build_client(args)
+    backend = _build_backend(args)
     model = args.model or DEFAULT_MODEL
+    backend.set_model(model)
     if args.pick:
-        model = pick_model(client)
+        if isinstance(backend, OpenRouterBackend):
+            backend.set_model(pick_model(backend._client))
     messages = [{"role": "user", "content": args.prompt}]
     try:
-        for delta in client.chat_stream_content(model, messages):
-            print(delta, end="", flush=True)
+        if isinstance(backend, OpenRouterBackend):
+            for delta in backend.stream(messages):
+                print(delta, end="", flush=True)
+        else:
+            message = backend.complete(messages)
+            print(_blocks_to_text(message.get("content")))
         print()
     except OpenRouterError as exc:
         print(f"\nError: {exc}", file=sys.stderr)
@@ -214,7 +177,34 @@ def cmd_models(args: argparse.Namespace) -> int:
 
 
 def cmd_sessions(args: argparse.Namespace) -> int:
-    """List/delete saved sessions."""
+    """List/delete/export/import saved sessions."""
+    if args.export:
+        sess = load_session(args.export)
+        fmt = args.format
+        out = args.out_path
+        # Default output path: <name>.<ext> if --out looks like a directory.
+        if os.path.isdir(out):
+            ext = "json" if fmt == "json" else "md"
+            out = os.path.join(out, f"{_slug(args.export)}.{ext}")
+        else:
+            fmt = "auto" if fmt == "auto" else fmt
+        used_fmt = export_session(sess, out, fmt)
+        print(f"Berhasil mengekspor sesi '{sess.get('name')}' ke {out} ({used_fmt}).")
+        return 0
+
+    if args.import_file:
+        try:
+            imported = import_session(args.import_file)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Could not import {args.import_file}: {exc}", file=sys.stderr)
+            return 1
+        except OpenRouterError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        name = save_imported_session(imported)
+        print(f"Imported '{name}' from {args.import_file} (name: {imported.get('name')}).")
+        return 0
+
     if args.delete:
         removed = delete_session(args.delete)
         if removed:
@@ -236,11 +226,22 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _save_session_quiet(session) -> bool:
+    """Persist a session dict, returning True on success. Corrupt-safe."""
+    try:
+        save_session(session)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
 def cmd_repl(args: argparse.Namespace) -> int:
-    client = _build_client(args)
+    backend = _build_backend(args)
     model = args.model or DEFAULT_MODEL
-    if args.pick:
-        model = pick_model(client)
+    backend.set_model(model)
+    if args.pick and isinstance(backend, OpenRouterBackend):
+        backend.set_model(pick_model(backend._client))
+        model = backend.model
 
     tools = build_default_tools() if args.tools else None
 
@@ -252,67 +253,187 @@ def cmd_repl(args: argparse.Namespace) -> int:
     elif args.continue_session:
         session_name = pick_session_interactive()
         if session_name is None:
-            print("Starting a fresh session.")
+            print("Memulai sesi baru.")
     if session_name:
         session = load_session(session_name)
         num_turns = len(session["messages"])
         if num_turns:
-            print(f"Resuming session '{session_name}' with {num_turns} messages.")
-            model = session.get("model") or model
+            print(f"Melanjutkan sesi '{session_name}' ({num_turns} pesan).")
+            if session.get("model"):
+                model = session["model"]
+                backend.set_model(model)
         else:
-            print(f"Starting new session '{session_name}'.")
+            print(f"Memulai sesi baru '{session_name}'.")
         session["model"] = model
 
     messages: list[dict[str, Any]] = session["messages"] if session else []
-    print(f"OpenRouter REPL — model: {model}  (Ctrl+D/Ctrl+C to quit)")
+    print(f"OpenRouter REPL — model: {backend.model}  (Ctrl+D/Ctrl+C untuk keluar)")
     if session_name:
-        print(f"Session: {session_name}")
+        print(f"Sesi: {session_name}")
     if tools:
-        print("Tools enabled: " + ", ".join(sorted(TOOL_FUNCS)))
+        print("Tools aktif: " + ", ".join(sorted(TOOL_FUNCS)))
+    print("Ketik /help untuk bantuan.")
     print("-" * 50)
+
+    def show_banner() -> None:
+        print(f"\n→ Model aktif: {backend.model} (backend: {backend.backend_name})")
+        if session_name:
+            print(f"→ Sesi: {session_name} ({len(messages)} pesan)")
+        print()
 
     while True:
         try:
             user = input("You > ")
         except (EOFError, KeyboardInterrupt):
-            print()
+            print("\nSampai jumpa!")
             if session_name is not None:
-                try:
-                    save_session(session)
-                except OSError as exc:
-                    print(f"Could not save session: {exc}", file=sys.stderr)
-                else:
-                    print(f"Session saved to '{session_name}'.")
+                _save_session_quiet(session)
             return 0
-        if user.strip().lower() in {"exit", "quit"}:
+
+        cmd = user.strip()
+        low = cmd.lower()
+
+        # --- perintah keluar ---
+        if low in {"exit", "quit"}:
             if session_name is not None:
-                try:
-                    save_session(session)
-                except OSError as exc:
-                    print(f"Could not save session: {exc}", file=sys.stderr)
-                else:
-                    print(f"Session saved to '{session_name}'.")
+                ok = _save_session_quiet(session)
+                print("Sesi tersimpan." if ok else "Gagal menyimpan sesi.")
             return 0
+
+        # --- perintah slash ---
+        if cmd.startswith("/"):
+            handled = _handle_repl_command(
+                cmd, backend, messages, session, session_name, show_banner
+            )
+            if handled == "exit":
+                return 0
+            continue
+
         if not user.strip():
             continue
+
         messages.append({"role": "user", "content": user})
-
         try:
-            if tools:
-                messages = step_with_tools(client, model, messages, tools)
-                final = messages[-1]
-                content = final.get("content")
+            if tools and isinstance(backend, OpenRouterBackend):
+                message = _step_with_backend_tools(backend, messages, tools)
+                content = message.get("content")
             else:
-                response = client.chat(model, messages)
-                messages.append(response["choices"][0]["message"])
-                content = messages[-1].get("content")
+                message = backend.complete(messages)
+                content = message["content"]
+                messages.append({"role": "assistant", "content": _blocks_to_text(content)})
 
-            if isinstance(content, str):
-                print(f"\n{model} > {content}\n")
-            else:
-                print(f"\n{model} > {_blocks_to_text(content)}\n")
+            print(f"\n{backend.model} > {_blocks_to_text(content)}\n")
         except OpenRouterError as exc:
             print(f"Error: {exc}", file=sys.stderr)
+
+
+def _handle_repl_command(
+    cmd: str,
+    backend: Backend,
+    messages: list[dict[str, Any]],
+    session,
+    session_name: Optional[str],
+    show_banner,
+) -> str:
+    """Handle a slash command in the REPL. Returns 'exit' to quit the loop."""
+    parts = cmd.split()
+    name = parts[0].lower()
+
+    if name == "/help":
+        print(
+            "\nPerintah:\n"
+            "  /model <id>      ganti model\n"
+            "  /models          daftar model yang tersedia (backend OpenRouter)\n"
+            "  /clear           hapus riwayat percakapan sesi ini\n"
+            "  /status          tampilkan model & sesi aktif\n"
+            "  /quit, exit      keluar (sesi otomatis tersimpan)\n"
+        )
+        return ""
+
+    if name == "/model":
+        if len(parts) < 2:
+            print(f"Model aktif: {backend.model}")
+            return ""
+        backend.set_model(parts[1])
+        if session is not None:
+            session["model"] = parts[1]
+        print(f"→ Model diganti: {parts[1]}")
+        return ""
+
+    if name == "/models":
+        if isinstance(backend, OpenRouterBackend):
+            models = backend.available_models()
+            if models:
+                print("Model tersedia:")
+                for m in models[:100]:
+                    print(f"  {m}")
+            else:
+                print("Tidak bisa ambil daftar model (jaringan/API).")
+        else:
+            print("Backend llm-router tidak menyediakan daftar model.")
+        return ""
+
+    if name == "/clear":
+        messages.clear()
+        if session_msg := (session or {}).get("messages"):
+            session_msg.clear()
+        print("Riwayat percakapan dihapus.")
+        return ""
+
+    if name == "/status":
+        show_banner()
+        return ""
+
+    if name in {"/quit", "/exit"}:
+        return "exit"
+
+    print(f"Perintah tidak dikenal: {name}. Ketik /help untuk bantuan.")
+    return ""
+
+
+def _step_with_backend_tools(
+    backend: OpenRouterBackend,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Run one exchange executing tool calls via the OpenRouter backend."""
+    # Reuse the existing tool-loop helper by constructing a client-like wrapper.
+    return _tools_loop(backend, messages, tools)
+
+
+def _tools_loop(backend, messages, tools) -> dict[str, Any]:
+    message = backend.complete(messages, tools=tools)
+    messages.append(message)
+
+    if message.get("tool_calls"):
+        for call in message["tool_calls"]:
+            fn = call.get("function", {})
+            name = fn.get("name", "")
+            args_raw = fn.get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw) if args_raw else {}
+            except json.JSONDecodeError:
+                args = {}
+            if name in TOOL_FUNCS:
+                try:
+                    value = TOOL_FUNCS[name](**args)
+                    result = str(value)
+                except Exception as exc:  # noqa: BLE001
+                    result = f"Error: {exc}"
+            else:
+                result = f"Unknown tool: {name}"
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.get("id", ""),
+                    "content": result,
+                }
+            )
+        final = backend.complete(messages, tools=tools)
+        messages.append(final)
+        return final
+    return message
 
 
 def _blocks_to_text(content: Any) -> str:
@@ -338,6 +459,22 @@ def _build_client(args: argparse.Namespace) -> OpenRouterClient:
     )
 
 
+def _build_backend(args: argparse.Namespace) -> Backend:
+    """Return the selected backend based on CLI flags.
+
+    - default: OpenRouterBackend (HTTP via OpenRouterClient)
+    - --router: LlmRouterBackend (drives the local llm-router package)
+    """
+    if getattr(args, "router", False):
+        return LlmRouterBackend(
+            model=args.model or DEFAULT_MODEL,
+            task=getattr(args, "router_task", None) or "default",
+            budget_usd=getattr(args, "router_budget", None),
+            provider=getattr(args, "router_provider", None),
+        )
+    return OpenRouterBackend(_build_client(args), args.model or DEFAULT_MODEL)
+
+
 # ---------------------------------------------------------------------- #
 # Argument parsing
 # ---------------------------------------------------------------------- #
@@ -354,6 +491,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=120.0, help="HTTP timeout (s)");
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Model id to use");
     parser.add_argument("--pick", action="store_true", help="Choose a model interactively");
+    parser.add_argument(
+        "--router", action="store_true",
+        help="Route through the local llm-router package (Claude/DeepSeek/OpenRouter)",
+    );
+    parser.add_argument("--router-task", help="Task name for llm-router policy");
+    parser.add_argument("--router-budget", type=float, help="Budget (USD) for llm-router");
+    parser.add_argument("--router-provider", help="Force provider for llm-router (anthropic/deepseek/openrouter)");
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -379,8 +523,12 @@ def build_parser() -> argparse.ArgumentParser:
     );
     p_repl.set_defaults(func=cmd_repl)
 
-    p_sessions = sub.add_parser("sessions", help="List saved chat sessions")
+    p_sessions = sub.add_parser("sessions", help="List/export/import saved chat sessions")
     p_sessions.add_argument("--delete", metavar="NAME", help="Delete a session by name");
+    p_sessions.add_argument("--export", metavar="NAME", help="Export a session to a file");
+    p_sessions.add_argument("--out", dest="out_path", default=".", help="Output file path (used with --export)");
+    p_sessions.add_argument("--format", choices=["auto", "md", "json"], default="auto", help="Export format");
+    p_sessions.add_argument("--import", dest="import_file", metavar="FILE", help="Import a session JSON file");
     p_sessions.set_defaults(func=cmd_sessions)
 
     return parser
