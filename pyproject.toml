@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openrouter-cli"
+version = "1.0.0"
+description = "Minimal, dependency-free OpenRouter API client and interactive CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[project.scripts]
+openrouter = "openrouter_cli.cli:main"
+
+[tool.setuptools]
+packages = ["openrouter_cli"]
