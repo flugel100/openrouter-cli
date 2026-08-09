@@ -10,6 +10,8 @@ Model dapat meminta eksekusi tool (function calling). Registry ini:
 from __future__ import annotations
 
 import datetime
+import fnmatch
+import glob as glob_module
 import json
 import os
 import subprocess
@@ -114,6 +116,73 @@ def _tool_run_command(command: str) -> str:
         return f"Error menjalankan '{command}': {exc}"
 
 
+def _tool_edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+    """Ganti string dalam file (search & replace presisi)."""
+    p = os.path.abspath(os.path.expanduser(path))
+    cwd = os.path.abspath(os.getcwd())
+    if not p.startswith(cwd):
+        return f"Akses ditolak: {path} di luar direktori kerja."
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        if replace_all:
+            count = content.count(old_string)
+            content = content.replace(old_string, new_string)
+        else:
+            count = 1 if old_string in content else 0
+            content = content.replace(old_string, new_string, 1)
+        if count == 0:
+            return f"Error: string tidak ditemukan di {path}"
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return f"Berhasil: {count} penggantian di {path}."
+    except Exception as exc:
+        return f"Error edit {path}: {exc}"
+
+
+def _tool_glob(pattern: str) -> str:
+    """Cari file dengan pola glob."""
+    try:
+        matches = sorted(glob_module.glob(pattern, recursive=True))[:50]
+        if not matches:
+            return f"Tidak ada file yang cocok dengan '{pattern}'."
+        return "\n".join(matches)
+    except Exception as exc:
+        return f"Error glob '{pattern}': {exc}"
+
+
+def _tool_grep(pattern: str, include: str = "") -> str:
+    """Cari teks dengan grep di file."""
+    import re
+    cwd = os.getcwd()
+    results: list[str] = []
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        return f"Error regex: {exc}"
+
+    for root, dirs, files in os.walk(cwd):
+        # Skip hidden & venv
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in {"node_modules", "__pycache__", ".venv", "venv", "dist", "build"}]
+        for fname in sorted(files):
+            if include and not fnmatch.fnmatch(fname, include):
+                continue
+            path = os.path.join(root, fname)
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    for lineno, line in enumerate(fh, 1):
+                        if compiled.search(line):
+                            rel = os.path.relpath(path, cwd)
+                            results.append(f"{rel}:{lineno}: {line.rstrip()[:120]}")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if len(results) >= 30:
+                break
+        if len(results) >= 30:
+            break
+    return "\n".join(results) if results else f"Tidak ada yang cocok dengan '{pattern}'."
+
+
 # --------------------------------------------------------------------------- #
 # Default tools
 # --------------------------------------------------------------------------- #
@@ -181,6 +250,47 @@ BUILTIN_TOOLS: list[Tool] = [
         _tool_run_command,
         category="system",
         dangerous=True,
+    ),
+    Tool(
+        "edit_file", "Ganti string persis di file (search & replace).",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path file relatif"},
+                "old_string": {"type": "string", "description": "Teks yang akan diganti (harus persis)"},
+                "new_string": {"type": "string", "description": "Teks pengganti"},
+                "replace_all": {"type": "boolean", "description": "Ganti semua kemunculan (default false)"},
+            },
+            "required": ["path", "old_string", "new_string"],
+        },
+        _tool_edit_file,
+        category="file",
+        dangerous=True,
+    ),
+    Tool(
+        "glob_files", "Cari file berdasarkan pola glob (contoh: **/*.py, src/**/*.ts).",
+        {
+            "type": "object",
+            "properties": {"pattern": {"type": "string", "description": "Pola glob"}},
+            "required": ["pattern"],
+        },
+        _tool_glob,
+        category="file",
+        dangerous=False,
+    ),
+    Tool(
+        "grep_search", "Cari teks di file dengan regex.",
+        {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Pola regex"},
+                "include": {"type": "string", "description": "Filter file (contoh: *.py, *.go) (opsional)"},
+            },
+            "required": ["pattern"],
+        },
+        _tool_grep,
+        category="file",
+        dangerous=False,
     ),
 ]
 

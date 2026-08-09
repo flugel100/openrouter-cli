@@ -108,6 +108,7 @@ def show_help() -> None:
         "/status          tampilkan model & sesi aktif",
         "/stream on|off   nyalakan/matikan streaming token",
         "/agent [tugas]   jalankan agent audit kode",
+        "/coder [tugas]   jalankan coding agent otonom",
         "/quit, exit      keluar (sesi otomatis tersimpan)",
     ]
     if HAS_RICH:

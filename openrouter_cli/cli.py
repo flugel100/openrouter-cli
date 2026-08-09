@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from . import __version__
 from . import ui
-from .agents import UltracodeAgent, AgentReport
+from .agents import UltracodeAgent, AgentReport, CoderAgent, run_coder
 from .backends import Backend, LlmRouterBackend, OpenRouterBackend
 from .client import (
     OpenRouterClient,
@@ -421,6 +421,16 @@ def _handle_repl_command(
             ui.show_error("Agent hanya untuk backend OpenRouter.")
         return ""
 
+    if name == "/coder":
+        task = " ".join(parts[1:]) if len(parts) > 1 else "perbaiki kode ini"
+        ui.show_info(f"Coder: {task}")
+        if isinstance(backend, OpenRouterBackend):
+            result = run_coder(backend, task, verbose=True)
+            print(f"\n[CODER] Selesai dalam {result['turns']} turn.\n{result['output']}")
+        else:
+            ui.show_error("Coder hanya untuk backend OpenRouter.")
+        return ""
+
     if name in {"/quit", "/exit"}:
         return "exit"
 
@@ -514,6 +524,23 @@ def cmd_serve(args: argparse.Namespace) -> int:
     except OSError as exc:
         ui.show_error(f"Gagal mulai server: {exc}")
         return 1
+    return 0
+
+
+def cmd_coder(args: argparse.Namespace) -> int:
+    """Jalankan coding agent otonom (seperti OpenCode / Claude Code)."""
+    backend = _build_backend(args)
+    if not isinstance(backend, OpenRouterBackend):
+        ui.show_error("Coder hanya didukung pada backend OpenRouter (tanpa --router).")
+        return 1
+
+    tools = build_default_registry(approval="auto")
+    agent = CoderAgent(backend, tools, max_turns=args.max_turns, verbose=not args.quiet)
+    ui.show_info(f"Coder agent — tugas: {args.task}")
+
+    result = agent.run(args.task, scope=args.scope)
+    print(f"\n[CODER] Selesai dalam {result['turns']} turn.\n")
+    print(result["output"])
     return 0
 
 
@@ -621,6 +648,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_agent.add_argument("--output", "-o", help="Simpan laporan ke file")
     p_agent.add_argument("--quiet", "-q", action="store_true", help="Sembunyikan log agent")
     p_agent.set_defaults(func=cmd_agent)
+
+    p_coder = sub.add_parser("coder", help="Jalankan coding agent otonom (seperti OpenCode/Claude Code)")
+    p_coder.add_argument("task", help="Deskripsi tugas coding")
+    p_coder.add_argument("--scope", default=".", help="Direktori kerja")
+    p_coder.add_argument("--max-turns", type=int, default=10, help="Maksimum turn agent")
+    p_coder.add_argument("--quiet", "-q", action="store_true", help="Sembunyikan log")
+    p_coder.set_defaults(func=cmd_coder)
 
     p_serve = sub.add_parser("serve", help="Mulai server HTTP OpenAI-compatible")
     p_serve.add_argument("--host", default="127.0.0.1", help="Alamat bind (default: 127.0.0.1)")

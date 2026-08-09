@@ -403,3 +403,120 @@ def run_ultracode(
     """Jalankan agent ultracode dan kembalikan laporan."""
     agent = UltracodeAgent(backend, tier=tier, verbose=verbose)
     return agent.run(task, scope)
+
+
+# --------------------------------------------------------------------------- #
+# CoderAgent — coding assistant seperti OpenCode / Claude Code
+# --------------------------------------------------------------------------- #
+
+CODER_SYSTEM_PROMPT = """Kamu adalah coding assistant otonom. Kamu bisa membaca, menulis, mengedit file, dan menjalankan perintah di terminal.
+
+ATURAN:
+1. BACA dulu — pahami struktur project sebelum menyentuh kode. Gunakan glob_files, grep_search, dan read_file.
+2. TULIS/EDIT — setelah paham, gunakan write_file atau edit_file.
+3. VERIFIKASI — setelah edit, jalankan test/build dengan run_command.
+4. Iterasi sampai benar — kalau test gagal, baca error, perbaiki, ulangi.
+
+TOOLS:
+- read_file(path) — baca isi file
+- write_file(path, content) — tulis file baru / overwrite
+- edit_file(path, old_string, new_string, replace_all=false) — ganti teks persis
+- glob_files(pattern) — cari file (contoh: **/*.py)
+- grep_search(pattern, include) — cari teks di file
+- run_command(command) — jalankan perintah shell
+- web_fetch(url) — ambil konten web
+
+OUTPUT: selalu jelaskan apa yang kamu lakukan, kenapa, dan hasilnya.
+Jika buntu >3x, tanya user. Jangan berasumsi."""  # noqa: E501
+
+
+class CoderAgent(Agent):
+    """Agent coding otonom — baca → edit → verifikasi → iterasi."""
+
+    name = "coder"
+
+    def __init__(
+        self,
+        backend: Backend,
+        tools: Optional[ToolRegistry] = None,
+        *,
+        max_turns: int = 10,
+        verbose: bool = False,
+    ):
+        super().__init__(backend, tools, max_turns=max_turns, verbose=verbose)
+
+    def run(self, task: str, scope: str = ".") -> dict[str, str]:
+        self._log(f"[CODER] Tugas: {task}")
+
+        # Auto-detect project context
+        context = self._detect_context()
+        if context:
+            self._log(f"[CODER] Konteks project: {context[:100]}...")
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": CODER_SYSTEM_PROMPT},
+        ]
+
+        if context:
+            messages.append({"role": "user", "content": f"KONTEKS PROJECT:\n{context}"})
+
+        messages.append({"role": "user", "content": f"TUGAS: {task}"})
+
+        output_parts: list[str] = []
+        for turn in range(self.max_turns):
+            self._log(f"[CODER] Turn {turn + 1}/{self.max_turns}")
+            resp = self._step_with_tools(messages)
+            output_parts.append(resp)
+
+            # Cek apakah tugas selesai (model bilang selesai)
+            if any(kw in resp.lower() for kw in ["selesai", "done", "berhasil", "semua ok"]):
+                if turn >= 1:  # jangan berhenti di turn pertama
+                    self._log("[CODER] Selesai.")
+                    break
+
+        return {
+            "output": "\n\n".join(output_parts),
+            "turns": str(turn + 1),
+        }
+
+    def _detect_context(self) -> str:
+        """Deteksi file konteks project (CLAUDE.md, package.json, dll)."""
+        import os
+
+        context_files = [
+            "CLAUDE.md", "CLAUDE.local.md", "README.md",
+            "package.json", "pyproject.toml", "Cargo.toml",
+            "go.mod", "Makefile", "Dockerfile",
+        ]
+        parts: list[str] = []
+        cwd = os.getcwd()
+
+        for fname in context_files:
+            path = os.path.join(cwd, fname)
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as fh:
+                        content = fh.read(2000)
+                    parts.append(f"=== {fname} ===\n{content}")
+                except OSError:
+                    pass
+
+        # Juga list struktur direktori
+        try:
+            items = sorted(os.listdir(cwd))[:30]
+            parts.insert(0, "STRUKTUR DIR:\n" + "\n".join(f"  {i}" for i in items))
+        except OSError:
+            pass
+
+        return "\n\n".join(parts)
+
+
+def run_coder(
+    backend: Backend,
+    task: str,
+    *,
+    verbose: bool = False,
+) -> dict[str, str]:
+    """Jalankan agent coder."""
+    agent = CoderAgent(backend, verbose=verbose)
+    return agent.run(task)
