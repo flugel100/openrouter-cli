@@ -4,11 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openrouter-cli"
-version = "1.5.0"
+version = "1.5.1"
 description = "Terminal AI: OpenRouter client + REPL streaming + tools + ultracode agent"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
+authors = [{ name = "flugel100" }]
+keywords = ["openrouter", "cli", "ai", "llm", "chat", "code-review", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+]
+urls = { repository = "https://github.com/flugel100/openrouter-cli" }
 
 [project.optional-dependencies]
 cli = ["rich>=13"]
